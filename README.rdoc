@@ -8,21 +8,30 @@ with a test server in Sinatra (uses async_sinatra under Thin).
   <script src="http://ajax.googleapis.com/ajax/libs/jquery/1.5.1/jquery.min.js"> </script>
   <script src="jquery.comet.js"> </script>
   <script>
-   // Connect and start polling:
-   $.comet.init('http://my.server.com:9191')
+      // Connect and start polling:
+      $.comet.init('http://my.server.com:9191')
 
-   // Receive messages sent to this channel:
-   $.comet.subscribe('/myapp/channel1', function(msg) { ... });
+      // Receive messages sent to this channel:
+      $.comet.subscribe('/myapp/channel1', function(msg) { ... });
 
-   // Send a message via the server to all subscribers on this channel:
-   $.comet.publish('/myapp/channel1', {some: obj, json: 2});
+      // Send a message via the server to all subscribers on this channel:
+      $.comet.publish('/myapp/channel1', {some: obj, json: 2});
 
-   // Stop listening to channel:
-   $.comet.unsubscribe('/myapp/channel1');
+      // Stop listening to channel:
+      $.comet.unsubscribe('/myapp/channel1');
 
-   // Stop polling
-   $.comet.disconnect();
+      // Stop polling
+      $.comet.disconnect();
   </script>
+
+When you publish a message, it won't get sent immediately. You can publish as
+many as you like within the one function, and even return to where other queued
+callbacks will publish additional messages, and your messages will be batched
+and sent all together when the browser pauses.
+
+If a poll fails, messages will be queued until it comes back again. Once a message
+has been sent however, there's no guarantee it will be delivered in the case of
+a server crash.
 
 == Running the demo
 
@@ -35,6 +44,13 @@ You need to have Ruby installed. Then:
 Now visit localhost:8080 with one or more browsers. Because it uses async_sinatra,
 which uses EventMachine, it won't work in Passenger. Sorry about that, but Apache
 doesn't really like long-polling anyhow.
+
+== License
+
+The jquery.comet.js and chat_server are subject to the MIT license.
+
+The client_demo directory contains a chat client written by Morgan Allen, and subject
+to the GPL v2. See his original code at <http://code.google.com/p/jquerycomet/>.
 
 == Compatibility
 

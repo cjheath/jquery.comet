@@ -22,7 +22,7 @@ class ChatServer < Bayeux
 
   configure do
     set :port, 8080
-    set :tracing, true      # Enable to get Bayeux tracing
+    # set :tracing, true      # Enable to get Bayeux tracing
   end
 
   get '/' do
@@ -42,7 +42,7 @@ class ChatServer < Bayeux
     {
       :successful => true,
       :channel => channel_name,
-      :clientId => message['clientId']
+      :clientId => message['clientId'],
       :id => message['id']
     }
   end

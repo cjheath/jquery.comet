@@ -50,12 +50,11 @@
 
       polling = true;
       self.send(msg,
-	function(responseStr) {
-	  var response = (typeof responseStr != "object") ? (eval('(' + responseStr + ')')) : responseStr;
+	function(response) {
 	  polling = false;
 	  $.comet.deliver(response);
 	  if (continuePolling)
-	    reconnect(responseStr.length > 0);
+	    reconnect(response.length > 0);
 	}
       );
     };
@@ -93,8 +92,7 @@
     };
 
     this.send = function(msg, responseCB) {
-      var defaultCallback = function(responseStr) {
-        var response = (typeof responseStr != "object") ? (eval('(' + responseStr + ')')) : responseStr;
+      var defaultCallback = function(response) {
         $.comet.deliver(response);
 	reconnect(false);
       };
@@ -141,18 +139,16 @@
 
     this.supportedConectionTypes = [ 'long-polling', 'callback-polling' ];
 
-    var handshook = function(responseStr) {
-      var response = (typeof responseStr != "object") ? (eval('(' + responseStr + ')')[0]) : responseStr[0];
-
-      if (response.advice)
-        transport.advise(response.advice);
+    var handshook = function(response) {
+      if (response[0].advice)
+        transport.advise(response[0].advice);
 
       // do version check?
-      if (response.successful)
+      if (response[0].successful)
       {
         transport.version = $.comet.version;
 
-        $.comet.clientId = response.clientId;
+        $.comet.clientId = response[0].clientId;
 	$.comet.okToPoll = true;
         transport.startPolling();
 	sendMessages();

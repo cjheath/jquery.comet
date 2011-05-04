@@ -56,6 +56,8 @@ to the GPL v2. See his original code at <http://code.google.com/p/jquerycomet/>.
 
 Tested on Chrome, Safari, and FF3.5.
 
+JSONP (cross-domain) support requires jQuery >= 1.5.0
+
 == Developing
 
 Fork on github <https://github.com/cjheath/jquery.comet> or just clone to play:

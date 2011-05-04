@@ -58,7 +58,8 @@ Tested on Chrome, Safari, and FF3.5.
 
 == Developing
 
-  Fork on github <https://github.com/cjheath/jquery.comet> or just clone to play:
+Fork on github <https://github.com/cjheath/jquery.comet> or just clone to play:
+
   git clone git://github.com/cjheath/jquery.comet.git
 
 Patches welcome! Fork and send a pull request. Please follow coding conventions already in use.
@@ -76,4 +77,3 @@ Some enhancements are on the cards:
 
 * Multiple subscriptions to the same channel
 * Wildcard subscriptions (/channel/*/foo, /channel/**, etc)
-* The Sinatra test server will be factored out into a Bayeux base server and the chat demo server.

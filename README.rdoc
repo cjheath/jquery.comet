@@ -1,0 +1,63 @@
+= jquery.comet
+
+A lightweight clean implementation of the Bayeux (COMET) protocol as a jQuery plugin,
+with a test server in Sinatra (uses async_sinatra under Thin).
+
+== Usage
+
+  <script src="http://ajax.googleapis.com/ajax/libs/jquery/1.5.1/jquery.min.js"> </script>
+  <script src="jquery.comet.js"> </script>
+  <script>
+   // Connect and start polling:
+   $.comet.init('http://my.server.com:9191')
+
+   // Receive messages sent to this channel:
+   $.comet.subscribe('/myapp/channel1', function(msg) { ... });
+
+   // Send a message via the server to all subscribers on this channel:
+   $.comet.publish('/myapp/channel1', {some: obj, json: 2});
+
+   // Stop listening to channel:
+   $.comet.unsubscribe('/myapp/channel1');
+
+   // Stop polling
+   $.comet.disconnect();
+  </script>
+
+== Running the demo
+
+You need to have Ruby installed. Then:
+
+  gem install thin async_sinatra rack
+  cd chat_server
+  rackup --server thin
+
+Now visit localhost:8080 with one or more browsers. Because it uses async_sinatra,
+which uses EventMachine, it won't work in Passenger. Sorry about that, but Apache
+doesn't really like long-polling anyhow.
+
+== Compatibility
+
+Tested on Chrome, Safari, and FF3.5.
+
+== Developing
+
+  Fork on github <https://github.com/cjheath/jquery.comet> or just clone to play:
+  git clone git://github.com/cjheath/jquery.comet.git
+
+Patches welcome! Fork and send a pull request. Please follow coding conventions already in use.
+Please use jslint if you can. There are currently no warnings, please keep it that way.
+
+== Status
+
+Current release has a happy path (working ok), but other paths are less well tested:
+
+* Callback polling
+* Cross-domain polling using JSONP
+* Renegotiating the handshake
+
+Some enhancements are on the cards:
+
+* Multiple subscriptions to the same channel
+* Wildcard subscriptions (/channel/*/foo, /channel/**, etc)
+* The Sinatra test server will be factored out into a Bayeux base server and the chat demo server.

@@ -12,6 +12,7 @@ require 'eventmachine'
 class Bayeux < Sinatra::Base
   class Client
     attr_accessor :clientId       # The clientId we assigned
+    #attr_accessor :lastSeen       # Timestamp when we last had activity from this client
     attr_accessor :channel        # The EM::Channel on which this client subscribes
     attr_accessor :subscription   # The EM::Subscription if one is currently active
     attr_accessor :queue          # Messages queued for this client
@@ -77,8 +78,8 @@ class Bayeux < Sinatra::Base
   end
 
   def handshake message
-    publish :channel => '/cometd/meta', :action => "handshake", :reestablish => false, :successful => true
-    publish :channel => '/cometd/meta', :action => "connect", :successful => true
+    publish :channel => '/cometd/meta', :data => {}, :action => "handshake", :reestablish => false, :successful => true
+    publish :channel => '/cometd/meta', :data => {}, :action => "connect", :successful => true
     {
       :version => '1.0',
       :supportedConnectionTypes => ['long-polling','callback-polling'],
@@ -167,10 +168,14 @@ class Bayeux < Sinatra::Base
   end
 
   def disconnect message
-    if client = clients[clientId.to_s]
+    clientId = message['clientId']
+    if client = clients[clientId]
       # Kill an outstanding poll:
-      client.channel.unsubscribe(client.subscription) if client.subscription
-      client.subscription = nil
+      EM::schedule {
+        client.channel.unsubscribe(client.subscription) if client.subscription
+        client.subscription = nil
+        clients.delete(clientId)
+      }
       { :successful => true }
     else
       { :successful => false }
@@ -200,6 +205,9 @@ class Bayeux < Sinatra::Base
       when '/meta/connect'
         connect message
 
+      when '/meta/disconnect'
+        disconnect message
+
       # Other meta channels are disallowed
       when %r{/meta/(.*)}
         trace "Client #{clientId} tried to send a message to #{channel_name}"
@@ -209,9 +217,6 @@ class Bayeux < Sinatra::Base
       when %r{/service/(.*)}
         trace "Client #{clientId} sent a private message to #{channel_name}"
         { :successful => true }
-
-      when '/meta/disconnect'
-        disconnect message
 
       else
         puts "Unknown channel in request: "+message
@@ -231,14 +236,20 @@ class Bayeux < Sinatra::Base
 
   # Deliver a Bayeux message
   def deliver_all(message)
-    if message.is_a?(Array)
-      response = []
-      message.map do |m|
-        response += [deliver(m)].flatten
+    begin
+      if message.is_a?(Array)
+        response = []
+        message.map do |m|
+          response += [deliver(m)].flatten
+        end
+        response
+      else
+        Array(deliver(message))
       end
-      response
-    else
-      Array(deliver(message))
+    rescue NameError    # Usually an "Uncaught throw" from calling pass
+      raise
+    rescue => e
+      puts "#{e.class.name}: #{e.to_s}\n#{e.backtrace*"\n\t"}"
     end
   end
 

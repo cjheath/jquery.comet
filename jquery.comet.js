@@ -114,6 +114,8 @@
       {	  // regular AJAX for same domain calls
 	ajaxopts['type'] = 'post';
 	ajaxopts['data'] = { message: JSON.stringify(msg) };
+	// When I do this, msg gets serialised as "{"message":{"0":{...},"1":{...},...}
+	// ajaxopts['data'] = { message: msg };
       }
       else
       {	  // JSONP callback for cross domain
@@ -188,6 +190,7 @@
     var sendMessages = function() {
       if (!$.comet.okToPoll) return;	// Still in the handshake
 
+      var t = transport;
       var sendAfterPause =
 	function() {
 	  if (batchNest > 0 ||	        // oops, another batch was started
@@ -199,7 +202,7 @@
 	    this.clientId = String($.comet.clientId);
 	    this.id = String($.comet.nextId());
 	  });
-	  transport.send(messageQueue);
+	  t.send(messageQueue);
           messageQueue = [];
 	};
 
@@ -239,6 +242,7 @@
 	  $.event.trigger(msg.channel, [msg]);
 
 	var cb = subscriptionCallbacks[msg.channel];
+
 	if (cb)
 	  cb(msg);
       }

@@ -42,7 +42,6 @@ class Bayeux < Sinatra::Base
 
   configure do
     set :public, Sinatra::Application.root+'/../chat_demo'
-    set :channel, EM::Channel.new
     set :tracing, false      # Enable to get Bayeux tracing
   end
 
@@ -141,6 +140,7 @@ class Bayeux < Sinatra::Base
     if !queued.empty?
       client.queue << connect_response
       client.flush(self)
+      return
     end
 
     client.subscription =

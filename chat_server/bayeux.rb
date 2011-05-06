@@ -10,6 +10,27 @@ require 'json'
 require 'eventmachine'
 
 class Bayeux < Sinatra::Base
+  class Client
+    attr_accessor :clientId       # The clientId we assigned
+    attr_accessor :channel        # The EM::Channel on which this client subscribes
+    attr_accessor :subscription   # The EM::Subscription if one is currently active
+    attr_accessor :queue          # Messages queued for this client
+
+    def initialize clientId
+      @clientId = clientId
+      @channel = EM::Channel.new
+      @queue = []
+    end
+
+    def flush sinatra
+      queued = @queue
+      sinatra.trace "Sending to #{@clientId}: #{queued.inspect}"
+      @queue = []
+      sinatra.headers({'Content-Type' => 'application/json'})
+      sinatra.body(queued.to_json)
+    end
+  end
+
   register Sinatra::Async
 
   enable :show_exceptions
@@ -21,7 +42,7 @@ class Bayeux < Sinatra::Base
   configure do
     set :public, Sinatra::Application.root+'/../chat_demo'
     set :channel, EM::Channel.new
-    set :tracing, false
+    set :tracing, false      # Enable to get Bayeux tracing
   end
 
   def trace s
@@ -29,23 +50,35 @@ class Bayeux < Sinatra::Base
   end
 
   # Sinatra dup's this object, so we have to use class variables
-  # Each channel keeps a list of subscribed clientId's
+  # Each channel keeps a list of subscribed clients
   def channels
     @@channels ||= Hash.new {|h, k| h[k] = [] }
   end
 
-  # Each client has at most one EventMachine subscription
-  def client_em_subscriptions
-    @@client_em_subscriptions ||= {}
+  def clients
+    @@clients ||= {}
   end
 
   # ClientIds should be strong random numbers containing at least 128 bits of entropy. These aren't!
-  def next_client
-    @@next_client ||= 0
-    (@@next_client += 1).to_s
+  def next_client_id
+    @@next_client_id ||= 0
+    (@@next_client_id += 1).to_s
+  end
+
+  def publish message
+    channel = message['channel'] || message[:channel]
+    clients = channels[channel]
+    trace "publishing to #{channel} with #{clients.size} subscribers: #{message.inspect}"
+    clients.each do | client|
+      trace "Client #{client.clientId} will receive #{message.inspect}"
+      client.queue << message
+      client.channel.push true    # Wake up the subscribed client
+    end
   end
 
   def handshake message
+    publish :channel => '/cometd/meta', :action => "handshake", :reestablish => false, :successful => true
+    publish :channel => '/cometd/meta', :action => "connect", :successful => true
     {
       :version => '1.0',
       :supportedConnectionTypes => ['long-polling','callback-polling'],
@@ -61,13 +94,17 @@ class Bayeux < Sinatra::Base
     if subscription =~ %r{^/meta/}
       # No-one may subscribe to meta channels.
       # The Bayeux protocol allows server-side clients to (e.g. monitoring apps) but we don't.
+      trace "Client #{clientId} may not subscribe to #{subscription}"
       { :successful => false, :error => "500" }
     else
       subscribed_channel = subscription
-      trace "Subscribe from #{clientId} to #{subscribed_channel}"
-      subscriber_array = channels[subscribed_channel]
-      subscriber_array << clientId.to_s unless subscriber_array.include?(clientId.to_s)
-      settings.channel.push message   # For (future) monitoring clients
+      trace "Client #{clientId} wants messages from #{subscribed_channel}"
+      client_array = channels[subscribed_channel]
+      client = clients[clientId]
+      if client and !client_array.include?(client)
+        client_array << client
+      end
+      publish message
       {
         :successful => true,
         :subscription => subscribed_channel
@@ -78,10 +115,11 @@ class Bayeux < Sinatra::Base
   def unsubscribe message
     clientId = message['clientId']
     subscribed_channel = message['subscription']
-    trace "Unsubscribe from #{clientId} to #{subscribed_channel}"
-    subscriber_array = channels[subscribed_channel]
-    subscriber_array.delete(clientId)
-    settings.channel.push message   # For (future) monitoring clients
+    trace "Client #{clientId} no longer wants messages from #{subscribed_channel}"
+    client_array = channels[subscribed_channel]
+    client = clients[clientId]
+    client_array.delete(client)
+    publish message
     {
       :successful => true,
       :subscription => subscribed_channel
@@ -90,30 +128,53 @@ class Bayeux < Sinatra::Base
 
   def connect message
     clientId = message['clientId']
-    trace "#{clientId} is long-polling"
-    client_em_subscriptions[clientId.to_s] =
-    em_subscription =
-      settings.channel.subscribe do |msg|
-        if channels[msg[:channel]].include?(clientId)
-          trace "Sending pushed message #{msg.inspect}"
-          # REVISIT: headers doesn't seem to work here:
-          headers({'Content-Type' => 'application/json'})
-          connect_response = {
-            :channel => '/meta/connect', :clientId => clientId, :id => message['id'], :successful => true
-          }
-          body([msg, connect_response].to_json)
+    trace "Client #{clientId} is long-polling"
+    client = clients[clientId]
+    pass unless client        # Or "not authorised", or "handshake"?
+
+    connect_response = {
+      :channel => '/meta/connect', :clientId => clientId, :id => message['id'], :successful => true
+    }
+
+    queued = client.queue
+    if !queued.empty?
+      client.queue << connect_response
+      client.flush(self)
+    end
+
+    client.subscription =
+      client.channel.subscribe do |msg|
+        queued = client.queue
+        if !queued.empty?
+          client.queue << connect_response
+          client.flush(self)
         else
-          trace "#{clientId} ignores message #{msg.inspect} pushed to unsubscribed channel"
+          trace "Client #{clientId} awoke but found an empty queue"
         end
       end
-    if em_subscription
+
+    if client.subscription
+      trace "Client #{clientId} is waiting on #{client.subscription}"
       on_close {
         trace "long-poll done, removing EM subscription for #{clientId}"
-        settings.channel.unsubscribe(em_subscription)
-        client_em_subscriptions.delete(clientId.to_s)
+        client.channel.unsubscribe(client.subscription)
+        client.subscription = nil
       }
+    else
+      trace "Client #{clientId} failed to wait"
     end
     nil
+  end
+
+  def disconnect message
+    if client = clients[clientId.to_s]
+      # Kill an outstanding poll:
+      client.channel.unsubscribe(client.subscription) if client.subscription
+      client.subscription = nil
+      { :successful => true }
+    else
+      { :successful => false }
+    end
   end
 
   def deliver(message)
@@ -124,8 +185,9 @@ class Bayeux < Sinatra::Base
     response =
       case channel_name
       when '/meta/handshake'      # Client says hello, greet them
-        clientId = next_client
-        trace "Connecting #{clientId} from #{request.ip}"
+        clientId = next_client_id
+        clients[clientId] = Client.new(clientId)
+        trace "Client #{clientId} offers a handshake from #{request.ip}"
         handshake message
 
       when '/meta/subscribe'      # Client wants to subscribe to a channel:
@@ -140,20 +202,19 @@ class Bayeux < Sinatra::Base
 
       # Other meta channels are disallowed
       when %r{/meta/(.*)}
+        trace "Client #{clientId} tried to send a message to #{channel_name}"
         { :successful => false }
 
       # Service channels default to no-op. Service messages are never broadcast.
       when %r{/service/(.*)}
+        trace "Client #{clientId} sent a private message to #{channel_name}"
         { :successful => true }
 
       when '/meta/disconnect'
-        if em_subscription = client_em_subscriptions.delete(clientId.to_s)
-          settings.channel.unsubscribe(em_subscription)
-        end
-        { :successful => !!em_subscription }
+        disconnect message
 
       else
-        puts "Unknown channel in request: "+request.inspect
+        puts "Unknown channel in request: "+message
         pass  # 404
       end
 
@@ -173,7 +234,7 @@ class Bayeux < Sinatra::Base
     if message.is_a?(Array)
       response = []
       message.map do |m|
-        response += Array(deliver(m))
+        response += [deliver(m)].flatten
       end
       response
     else
@@ -182,12 +243,21 @@ class Bayeux < Sinatra::Base
   end
 
   apost '/cometd' do
+    # This code corrects for JSON serialisation bugs in Chrome,
+    # where an array gets serialised as an object. For now, I'm
+    # continuing to use json2.js, which does it properly.
+    #
+    #message = params['message']
+    #if message.is_a?(Hash) and message["0"]
+    #  message = message.keys.sort_by{|k| k.to_i}.inject([]) { |a, k| a << message[k] }
+    #end
+
     message_json = params['message']
     message = JSON.parse(message_json)
     response = deliver_all(message)
     unless response.empty?
       response_json = response.to_json
-      trace 'Responding: '+response_json
+      trace 'Responding: ' + response.map{|m| m.to_json}*"\n\t"
       headers({'Content-Type' => 'application/json'})
       body(response_json)
     end

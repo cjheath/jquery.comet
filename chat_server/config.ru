@@ -9,9 +9,6 @@
 # Copyright: Clifford Heath, Data Constellation, http://dataconstellation.com, 2011
 # License: MIT
 
-require 'ruby-debug'
-Debugger.start
-
 require 'bayeux'
 
 class ChatServer < Bayeux
@@ -36,7 +33,7 @@ class ChatServer < Bayeux
     return super unless channel_name == '/chat/demo'
 
     # Broadcast this message to any polling clients:
-    settings.channel.push :data => message['data'], :channel => channel_name
+    publish :data => message['data'], :channel => channel_name
 
     # and also acknowledge it:
     {

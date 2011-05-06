@@ -11,6 +11,13 @@
 
 require 'bayeux'
 
+# require 'ruby-debug'; Debugger.start
+
+class Bayeux::Client
+  attr_accessor :client_name
+  attr_accessor :connected
+end
+
 class ChatServer < Bayeux
   def initialize *a, &b
     puts "Making new ChatServer: #{object_id}"
@@ -26,11 +33,33 @@ class ChatServer < Bayeux
     send_file settings.public+'/index.html'
   end
 
+  def send_client_list
+    client_names = clients.map{|clientId, client| client.connected ? client.client_name : nil }.compact
+    publish :data => client_names.compact, :channel => '/chat/demo'
+  end
+
   def deliver(message)
     trace "delivering: "+message.inspect
 
     channel_name = message['channel']
-    return super unless channel_name == '/chat/demo'
+
+    if channel_name != '/chat/demo'
+      # Handle all general Bayeux traffic
+      s = super
+      send_client_list if channel_name =~ %r{/meta/(un)?subscribe}
+      return s
+    end
+
+    # Capture the names of clients as they join and maintain connected status
+    if data = message['data']
+      client = clients[message['clientId']]
+      if data['join']
+        client.client_name = data['user'] if client
+        client.connected = true
+      elsif data['leave']
+        client.connected = false
+      end
+    end
 
     # Broadcast this message to any polling clients:
     publish :data => message['data'], :channel => channel_name

@@ -12,13 +12,8 @@ class Bayeux::Client
 end
 
 class ChatServer < Bayeux
-  def initialize *a, &b
-    puts "Making new ChatServer: #{object_id}"
-    super
-  end
-
   configure do
-    set :port, 8080
+    set :public, Sinatra::Application.root+'/../chat_demo'
     # set :tracing, true      # Enable to get Bayeux tracing
   end
 

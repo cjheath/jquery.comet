@@ -41,7 +41,6 @@ class Bayeux < Sinatra::Base
   end
 
   configure do
-    set :public, Sinatra::Application.root+'/../chat_demo'
     set :tracing, false      # Enable to get Bayeux tracing
   end
 

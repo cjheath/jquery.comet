@@ -49,10 +49,10 @@ jQuery(function($) {
     }
     
     var altServer = $('#altServer').val();
-    var loc = (altServer.length > 0) ?
-      altServer :
-      document.location.protocol + "//" + document.location.hostname + ":" + document.location.port + "/cometd";
-    loc = "http://localhost:8080/cometd";
+    var loc =
+      document.location.protocol + "//" +
+	(altServer.length > 0 ? altServer : document.location.hostname) +
+	":" + document.location.port + "/cometd";
     console.log('comet connecting to '+loc);
 
     $.comet.init(loc);

@@ -106,6 +106,7 @@
 
       var ajaxopts = {
 	url: url,
+	timeout: (advice && advice.interval ? advice.interval : 5000),
 	success: successCB,
 	error: errorCB
       };
@@ -142,6 +143,7 @@
     this.supportedConectionTypes = [ 'long-polling', 'callback-polling' ];
 
     var handshook = function(response) {
+      if (response.length <= 0) return;	  // Handshake error
       if (response[0].advice)
         transport.advise(response[0].advice);
 

@@ -18,6 +18,10 @@ class ChatServer < Bayeux
   end
 
   get '/' do
+    redirect to('/chat'), 303
+  end
+
+  get '/chat' do
     send_file settings.public+'/index.html'
   end
 

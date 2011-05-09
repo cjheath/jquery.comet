@@ -10,6 +10,8 @@ require 'json'
 require 'eventmachine'
 
 class Bayeux < Sinatra::Base
+  register Sinatra::Async
+
   class Client
     attr_accessor :clientId       # The clientId we assigned
     #attr_accessor :lastSeen       # Timestamp when we last had activity from this client
@@ -27,12 +29,23 @@ class Bayeux < Sinatra::Base
       queued = @queue
       sinatra.trace "Sending to #{@clientId}: #{queued.inspect}"
       @queue = []
-      sinatra.headers({'Content-Type' => 'application/json'})
-      sinatra.body(queued.to_json)
+
+      sinatra.respond(queued)
     end
   end
 
-  register Sinatra::Async
+  # Send a JSON or JSONP response to an async_sinatra GET or POST
+  def respond messages
+    if jsonp = params['jsonp']
+      trace "responding jsonp=#{messages.to_json}"
+      headers({'Content-Type' => 'text/javascript'})
+      body "#{jsonp}(#{messages.to_json});\n"
+    else
+      trace "responding #{messages.to_json}"
+      headers({'Content-Type' => 'application/json'})
+      body messages.to_json
+    end
+  end
 
   enable :show_exceptions
 
@@ -41,11 +54,15 @@ class Bayeux < Sinatra::Base
   end
 
   configure do
-    set :tracing, false      # Enable to get Bayeux tracing
+    set :tracing, false         # Enable to get Bayeux tracing
+    set :poll_interval, 5       # 5 seconds for polling
+    set :long_poll_interval, 30 # maximum duration for a long-poll
   end
 
   def trace s
-    puts s if settings.tracing
+    if settings.tracing
+      puts s
+    end
   end
 
   # Sinatra dup's this object, so we have to use class variables
@@ -78,11 +95,13 @@ class Bayeux < Sinatra::Base
   def handshake message
     publish :channel => '/cometd/meta', :data => {}, :action => "handshake", :reestablish => false, :successful => true
     publish :channel => '/cometd/meta', :data => {}, :action => "connect", :successful => true
+    interval = params['jsonp'] ? settings.poll_interval : settings.long_poll_interval
+    trace "Setting interval to #{interval}"
     {
       :version => '1.0',
       :supportedConnectionTypes => ['long-polling','callback-polling'],
       :successful => true,
-      :advice => { :reconnect => 'retry', :interval => 5*1000 },
+      :advice => { :reconnect => 'retry', :interval => interval*1000 },
       :minimumVersion => message['minimumVersion'],
     }
   end
@@ -136,7 +155,7 @@ class Bayeux < Sinatra::Base
     }
 
     queued = client.queue
-    if !queued.empty?
+    if !queued.empty? || client.subscription
       client.queue << connect_response
       client.flush(self)
       return
@@ -150,6 +169,7 @@ class Bayeux < Sinatra::Base
           client.flush(self)
         else
           trace "Client #{clientId} awoke but found an empty queue"
+          respond([connect_response])   # Don't leave a dangling request.
         end
       end
 
@@ -253,7 +273,7 @@ class Bayeux < Sinatra::Base
   end
 
   apost '/cometd' do
-    # This code corrects for JSON serialisation bugs in Chrome,
+    # This code corrects for a JSON serialisation bug in Chrome,
     # where an array gets serialised as an object. For now, I'm
     # continuing to use json2.js, which does it properly.
     #
@@ -265,11 +285,29 @@ class Bayeux < Sinatra::Base
     message_json = params['message']
     message = JSON.parse(message_json)
     response = deliver_all(message)
-    unless response.empty?
-      response_json = response.to_json
-      trace 'Responding: ' + response.map{|m| m.to_json}*"\n\t"
-      headers({'Content-Type' => 'application/json'})
-      body(response_json)
+    if clientId = params['clientId'] and client = clients[clientId]
+      client.queue += response
+      client.channel.push true if !response.empty?  # Complete an outstanding poll
+      client.flush if params['jsonp'] || !client.queue.empty?
+    else
+      # No client so no queue. Respond immediately if we can, else long-poll
+      respond(response) unless response.empty?
+    end
+  end
+
+  # JSONP always uses a GET, since it fulfils a script tag.
+  # GETs can only send data which fit into a single URL, and this doesn't check for overflow!
+  aget '/cometd' do
+    message_json = params['message']
+    message = JSON.parse(message_json)
+    response = deliver_all(message)
+
+    if clientId = params['clientId'] and client = clients[clientId]
+      client.queue += response
+      client.channel.push true if !response.empty?  # Complete an outstanding poll
+      client.flush if params['jsonp'] || client.queue.empty?
+    else
+      respond(response)   # No client so no queue to worry about, always respond immediately
     end
   end
 

@@ -34,7 +34,6 @@
     var	// Connection details:
 	url,				// URL for the server
 	isCrossDomain,			// Set to true for cross-domain, to force JSONP
-	auth = null,			// Authorisation data to send with handshake
 	connected = false,		// Successful handshake yet?
 	clientId,			// The client ID assigned by the server
 
@@ -69,23 +68,44 @@
     this.connect = function(_url, options) {
       if (connected)
 	this.disconnect();
+
       url = _url;
       options = options || {};
-      auth = options['auth']
       // REVISIT: Handle more options, including timeouts and an auth-challenge callback.
       isCrossDomain =
 	url.substring(0,4) == 'http' &&
 	url.substr(7,location.href.length).replace(/\/.*/, '') != location.host;
+
+      // Connection failure handling:
+      errorCount = 0;			// Count of consecutive failed requests
+      errorTimeout = null;		// Current timeout object (to cancel on disconnect)
+      errorLastDelay = null;		// Current timeout duration
+
+      // Inbound:
+      polling = null;			// The XHR object for our long poll
+      receivedSeq = null;		// Sequence number for last message we received
+      receiptSent = null;		// Sequence number we last confirmed to the server
+
+      // Outbound:
+      sentSeq = 0;			// Sequence number for messages we send
+      confirmedSeq = null;		// Sequence number of last confirmed sent message
+      sending = null;			// The XHR object for a synchronous message
+      messagesQueued = [];		// Messages that have been published but not yet sent
+      batchNesting = 0;			// Nesting count of message batches
+
+      // Message channel subscriptions:
+      subscriptions = {};		// Keyed by channel name, each entry an array of callbacks
+
       // Kick off the party
       handshake();
     };
 
     this.disconnect = function() {
-      connected = false;
-      if (polling)
-	polling.abort();
-      // But allow any outstanding send to complete
-      polling = null;
+      // Sending a disconnect will terminate the poll
+      for (var channel in subscriptions)
+	command({channel: '/meta/subscribe', subscription: channel});
+      this.publish('/meta/disconnect', {id: (++sentSeq).toString(), clientId: clientId, channel: '/meta/disconnect'});
+      connected = false;    // Don't reconnect
     };
 
     this.startBatch = function() {
@@ -130,7 +150,7 @@
       if (s.length == 0) {
 	// No further subscriptions on this channel, tell the server
 	delete subscriptions[channel];
-	command({channel: '/meta/subscribe', subscription: channel});
+	command({channel: '/meta/unsubscribe', subscription: channel});
       }
     };
 

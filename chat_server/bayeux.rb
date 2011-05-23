@@ -19,11 +19,13 @@ class Bayeux < Sinatra::Base
     attr_accessor :subscription   # The EM::Subscription if one is currently active
     attr_accessor :satisfied
     attr_accessor :queue          # Messages queued for this client
+    attr_accessor :channels       # List of channels this client subscribed to
 
     def initialize clientId
       @clientId = clientId
       @channel = EM::Channel.new
       @queue = []
+      @channels = []
     end
 
     def flush sinatra
@@ -87,7 +89,6 @@ class Bayeux < Sinatra::Base
     clients = channels[channel]
     trace "publishing to #{channel} with #{clients.size} subscribers: #{message.inspect}"
     clients.each do | client|
-      trace "Client #{client.clientId} will receive #{message.inspect}"
       client.queue << message
       client.channel.push true    # Wake up the subscribed client
     end
@@ -122,6 +123,7 @@ class Bayeux < Sinatra::Base
       client = clients[clientId]
       if client and !client_array.include?(client)
         client_array << client
+        client.channels << subscribed_channel
       end
       publish message
       {
@@ -137,6 +139,7 @@ class Bayeux < Sinatra::Base
     trace "Client #{clientId} no longer wants messages from #{subscribed_channel}"
     client_array = channels[subscribed_channel]
     client = clients[clientId]
+    client.channels.delete(subscribed_channel)
     client_array.delete(client)
     publish message
     {
@@ -193,12 +196,14 @@ class Bayeux < Sinatra::Base
   def disconnect message
     clientId = message['clientId']
     if client = clients[clientId]
-      # Kill an outstanding poll:
-      EM::schedule {
-        client.channel.unsubscribe(client.subscription) if client.subscription
-        client.subscription = nil
-        clients.delete(clientId)
-      }
+      # Unsubscribe all subscribed channels:
+      while !client.channels.empty?
+        unsubscribe({'clientId' => clientId, 'channel' => '/meta/unsubscribe', 'subscription' => client.channels[0]})
+      end
+      client.queue += [{:channel => '/cometd/meta', :data => {}, :action => "connect", :successful => false}]
+      # Finish an outstanding poll:
+      client.channel.push true if client.subscription
+      clients.delete(clientId)
       { :successful => true }
     else
       { :successful => false }

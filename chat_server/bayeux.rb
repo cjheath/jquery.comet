@@ -148,7 +148,7 @@ class Bayeux < Sinatra::Base
   def connect message
     @is_connect = true
     clientId = message['clientId']
-    trace "Client #{clientId} is long-polling"
+    # trace "Client #{clientId} is long-polling"
     client = clients[clientId]
     pass unless client        # Or "not authorised", or "handshake"?
 
@@ -178,9 +178,9 @@ class Bayeux < Sinatra::Base
     client.satisfied = false
 
     if client.subscription
-      trace "Client #{clientId} is waiting on #{client.subscription}"
+      # trace "Client #{clientId} is waiting on #{client.subscription}"
       on_close {
-        trace "long-poll timed out, removing EM subscription for #{clientId}" unless client.satisfied
+        # trace "long-poll timed out, removing EM subscription for #{clientId}" unless client.satisfied
         client.channel.unsubscribe(client.subscription)
         client.subscription = nil
       }
@@ -288,7 +288,6 @@ class Bayeux < Sinatra::Base
 
     if clientId = params['clientId'] and client = clients[clientId]
       client.queue += response
-      client.channel.push true if !response.empty?  # Complete an outstanding poll
       client.flush if params['jsonp'] || !client.queue.empty?
     else
       # No client so no queue. Respond immediately if we can, else long-poll

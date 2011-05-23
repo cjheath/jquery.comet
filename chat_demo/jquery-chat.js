@@ -55,7 +55,7 @@ jQuery(function($) {
 	":" + document.location.port + "/cometd";
     console.log('comet connecting to '+loc);
 
-    $.comet.init(loc);
+    $.comet.connect(loc);
     // For x-domain test change line above to:
     // $.comet.init("http://127.0.0.1:8080/cometd/cometd");
     connected = true;

@@ -1,299 +1,307 @@
 /*
- * JQuery COMET (Bayeux protocol) plugin.
+ * JQuery long-polling message queueing plugin.
  *
- * This implements a bi-direction asynchronous JSON message queueing service.
- * It's rather less gruesome than the original, from the Dojo project.
+ * This implements a bi-direction asynchronous JSON message queueing service over
+ * COMET. Because it only uses XHR, it can be used on any server that supports
+ * long-polling; Flash sockets and Web Socket support are not needed.
+ *
+ * Two connections are used; one for sending messages and one for long-polling.
+ * Messages are never sent on the long-polling connection, even if available.
+ * Any response messages available when sent messages have been delivered
+ * will be returned on that channel, or at other times via the polling channel.
+ *
+ * A message is either a command or a data message, or an array of them (mixed).
+ * Every message sent contains a client ID returned from an initial handshake.
+ *
+ * Message Sequencing (NOT COMET):
+ * Each message sent and received contains a sequential sequence number called id.
+ * The response will be either a single message or an array of messages.
+ * Each response message from the server (returned either via a poll or in
+ * response to synchronous messages) will likewise contain an "id" property.
+ *
+ * In the event that no application messages are returned from a synchronous call,
+ * the following single message will be returned (to carry the confirm):
+ *	{seq: <server sequence number>, confirm: <client sequence number>}
+ *
+ * On XHR failure, the request will initially be retried immediately, then after
+ * errorDelay, increasing exponentially (by errorBackoff) up to errorMaxDelay.
  *
  * Copyright: Clifford Heath, Data Constellation, http://dataconstellation.com, 2011
  * License: MIT
- *
- * See also http://cometdproject.dojotoolkit.org/
  */
 (function($) {
-  var Transport = function(url) {
-    var isCrossDomain =
-      url.substring(0,4) == 'http' &&
-      url.substr(7,location.href.length).replace(/\/.*/, '') != location.host;
-    var connectionType = isCrossDomain ? 'callback-polling' : 'long-polling';
-    var polling = false;	  // We have no active poll yet
-    var continuePolling = true;	  // False after this transport is killed
-    var advice = null;	  // Server's advice tells us how and whether we should poll
+  $.comet = new function() {
+    var	// Connection details:
+	url,				// URL for the server
+	isCrossDomain,			// Set to true for cross-domain, to force JSONP
+	auth = null,			// Authorisation data to send with handshake
+	connected = false,		// Successful handshake yet?
+	clientId,			// The client ID assigned by the server
 
-    var self = this;	  // Connect gets called from a callback with wrong "this"
-    var connect = function() {
+	// Connection failure handling:
+	errorCount = 0,			// Count of consecutive failed requests
+	errorTimeout = null,		// Current timeout object (to cancel on disconnect)
+	errorLastDelay = null,		// Current timeout duration
+	errorDelay = 5*1000,		// Initial timeout in milliseconds for retry on error
+	errorBackoff = 1.5,		// Multiplier to increase timeout
+	errorMaxDelay = 60*1000,	// ... up to the maximum error count
+
+	// Inbound:
+	polling = null,			// The XHR object for our long poll
+	receivedSeq = null,		// Sequence number for last message we received
+	receiptSent = null,		// Sequence number we last confirmed to the server
+
+	// Outbound:
+	sentSeq = 0,			// Sequence number for messages we send
+	confirmedSeq = null,		// Sequence number of last confirmed sent message
+	sending = null,			// The XHR object for a synchronous message
+	messagesQueued = [],		// Messages that have been published but not yet sent
+	batchNesting = 0,		// Nesting count of message batches
+
+	// Message channel subscriptions:
+	subscriptions = {};		// Keyed by channel name, each entry an array of callbacks
+
+    // Private methods, forward declared:
+    var ajax, backoff, reconnect, poll, handshake, send, deliver, confirmed, command;
+    var advice;
+
+    // Public methods
+    this.connect = function(_url, options) {
+      if (connected)
+	this.disconnect();
+      url = _url;
+      options = options || {};
+      auth = options['auth']
+      // REVISIT: Handle more options, including timeouts and an auth-challenge callback.
+      isCrossDomain =
+	url.substring(0,4) == 'http' &&
+	url.substr(7,location.href.length).replace(/\/.*/, '') != location.host;
+      // Kick off the party
+      handshake();
+    };
+
+    this.disconnect = function() {
+      connected = false;
       if (polling)
-	return;
+	polling.abort();
+      // But allow any outstanding send to complete
+      polling = null;
+    };
 
-      if (advice && advice.reconnect == 'handshake')
+    this.startBatch = function() {
+      batchNesting++;
+    };
+
+    this.endBatch = function() {
+      if (--batchNesting <= 0)
       {
-	/*
-	 * We have to restart with a fresh handshake.
-	 * This transport object will be abandoned,
-	 * but an existing poll cannot be cancelled without
-	 * risk of data loss, so we leave it running, and
-	 * just make sure we don't start a new one.
-	 */
-	continuePolling = false;
-	$.comet.renegotiate(url);
-	return;
+        batchNesting = 0;
+	if (!sending && connected)
+	  send();
       }
+    };
 
-      if (!$.comet.okToPoll)
-	return;
+    // Send (or queue for sending) a message to a channel.
+    this.publish = function(channel, message) {
+      this.startBatch();
+      messagesQueued.push({id: (++sentSeq).toString(), clientId: clientId, channel: channel, data: message});
+      this.endBatch();
+    };
 
-      var msg = {
-	channel: '/meta/connect',
-	clientId: $.comet.clientId, 
-	id: String($.comet.nextId()),
-	connectionType: connectionType
+    // Add callback for channel and tell the server:
+    this.subscribe = function(channel, callback) {
+      var s = subscriptions[channel];
+      if (!s) {
+	// First subscription on this channel, tell the server
+	subscriptions[channel] = s = [];
+	command({channel: '/meta/subscribe', subscription: channel});
+      }
+      s.push(callback);
+    };
+
+    // Remove any occurrence of callback in the subscriptions for channel:
+    this.unsubscribe = function(channel, callback) {
+      var s = subscriptions[channel];
+      if (s) return;
+      for (i = s.length-1; i >= 0; i--) {
+	if (i in s)
+	  s.splice(i, 1);
+      }
+      if (s.length == 0) {
+	// No further subscriptions on this channel, tell the server
+	delete subscriptions[channel];
+	command({channel: '/meta/subscribe', subscription: channel});
+      }
+    };
+
+    // Low-level wrapper around jQuery's ajax method. Chooses a JSON POST or a JSONP GET.
+    ajax = function(messages, successCB, failureCB) {
+      var ajaxopts = {
+	url: url,
+	success: successCB,
+	error: failureCB
       };
 
-      polling = true;
-      self.send(msg,
-	function(response) {
-	  polling = false;
-	  $.comet.deliver(response);
-	  if (continuePolling)
-	    reconnect(response.length > 0);
+      if (isCrossDomain)
+      {	  // JSONP callback for cross domain
+	ajaxopts['dataType'] = 'jsonp';
+	ajaxopts['jsonp'] = 'jsonp';
+	ajaxopts['data'] = { message: JSON.stringify(messages) };
+      }
+      else
+      {	  // regular AJAX for same domain calls
+	ajaxopts['type'] = 'post';
+	ajaxopts['data'] = { message: JSON.stringify(messages) };
+	// When I do this, messages gets serialised as {"0":{...},"1":{...},...} in Chrome
+	// ajaxopts['data'] = messages;
+      }
+      return $.ajax(ajaxopts);
+    };
+
+    // An error has occurred. Record it, and after an increasing timeout, call the function passed:
+    backoff = function(func) {
+      errorCount++;
+      setTimeout(func, errorLastDelay);
+      errorLastDelay = errorLastDelay ? errorLastDelay*errorBackoff : errorDelay;
+      if (errorLastDelay > errorMaxDelay)
+	errorLastDelay = errorMaxDelay;
+    };
+
+    // Start, or restart, a poll
+    reconnect = function(after_error) {
+      if (polling || !connected) return;
+      if (after_error)
+	backoff(poll);
+      else {
+	// An error will initially cause an immediate retry, followed by delay and backoff.
+	errorCount = 0;
+	errorLastDelay = 0;
+	poll();
+      }
+    }
+
+    // Start a long-poll request now.
+    poll = function() {
+      polling = ajax(
+	{
+	  channel: '/meta/connect',
+	  clientId: clientId,
+	  id: (++sentSeq).toString(),
+	  connectionType: 'long-polling'
+	},
+	function(message) {	// Success, Process messages and reconnect immediately
+	  polling = null;
+	  deliver(message);
+	  reconnect(false);
+	},
+	function() {		// Error, reconnect after timeout
+	  polling = null;
+	  reconnect(true);
 	}
       );
     };
 
-    var reconnect = function(immediately) {
-      if (advice)
-      {
-        if (advice.reconnect == 'none')
-	{
-	  /*
-	   * Server told us not to continue polling.
-	   * We can continue sending messages, and
-	   * one of the responses we receive might
-	   * in future allow polling again.
-	   */
-	  return;
+    // No-op for now; part of the COMET protocol
+    advice = function(a) {};
+
+    // Say hello, retrying (with backoff) until we succeed:
+    handshake = function() {
+      var message = {id: (++sentSeq).toString(), channel: '/meta/handshake', minimumVersion: '0.9', version: '1.0'};
+
+      if (clientId) message['clientId'] = clientId;	// Reconnecting using previous client ID
+      ajax(
+	message,
+	function(messages) {
+	  greetz = messages[0];
+	  if (clientId = greetz['clientId']) {
+	    connected = true;
+	    if (greetz['advice'])
+	      advice(greetz['advice']);
+	    if (greetz['successful']) {
+	      reconnect(false);
+	      deliver(messages);
+	      for (m in messagesQueued)
+		messagesQueued[m].clientId = clientId;	// Ensure outbound messages have clientId
+	      $.comet.endBatch();	// Send any messages that were queued waiting for connect
+	      return;
+	    }
+	  }
+	  backoff(handshake);	// Keep trying
+	},
+	function() {		// Handshake connection failure
+	  backoff(handshake);	// Try again after timeout
 	}
-
-        if (advice.interval > 0 && !immediately)
-	{   // We can connect, but not immediately (had a failure and mustn't go spazz)
-          setTimeout(connect, advice.interval);
-	  return;
-	}
-      }
-      connect();
+      );
     };
 
-    // Receive new advice:
-    this.advise = function(new_advice) {
-      advice = new_advice;
-    };
-
-    this.startPolling = function() {
-      reconnect(true);
-    };
-
-    this.send = function(msg, responseCB) {
-      var defaultCallback = function(response) {
-        $.comet.deliver(response);
-	reconnect(false);
-      };
-
-      var successCB = responseCB || defaultCallback;
-      var errorCB = function(jqXHR, textStatus, errorThrown) {
-	// REVISIT: if msg is an array or msg.channel != '/meta/connect', we have possibly unsent data
-	// console.log('failed to connect');
-	successCB([]);
-      };
-
-      var ajaxopts = {
-	url: url,
-	timeout: (advice && advice.interval ? advice.interval : 5000),
-	success: successCB,
-	error: errorCB
-      };
-
-      if (connectionType == 'long-polling')
-      {	  // regular AJAX for same domain calls
-	ajaxopts['type'] = 'post';
-	ajaxopts['data'] = { message: JSON.stringify(msg) };
-	// When I do this, msg gets serialised as "{"message":{"0":{...},"1":{...},...}
-	// ajaxopts['data'] = { message: msg };
-      }
-      else
-      {	  // JSONP callback for cross domain
-	ajaxopts['dataType'] = 'jsonp';
-	ajaxopts['jsonp'] = 'jsonp';
-	ajaxopts['data'] = { message: JSON.stringify($.extend(msg,{connectionType: 'callback-polling' })) };
-      }
-      this.pollRequest = $.ajax(ajaxopts);
-    };
-  };
-
-  $.comet = new function() {
-    var	messageQueue = [],
-	subscriptions = [],
-	subscriptionCallbacks = [],
-	batchNest = 0,
-	trigger = true,	// this sends $.event.trigger(channel, data)
-	transport = null,
-	nextId = 0;
-
-    this.okToPoll = false;
-    this.clientId = '';
-
-    this.supportedConectionTypes = [ 'long-polling', 'callback-polling' ];
-
-    var handshook = function(response) {
-      if (response.length <= 0) return;	  // Handshake error
-      if (response[0].advice)
-        transport.advise(response[0].advice);
-
-      // do version check?
-      if (response[0].successful)
-      {
-        transport.version = $.comet.version;
-
-        $.comet.clientId = response[0].clientId;
-	$.comet.okToPoll = true;
-        transport.startPolling();
-	sendMessages();
-      }
-    };
-
-    this.nextId = function() {
-      return nextId++;
-    };
-
-    this.init = function(url) {
-      transport = new Transport(url || '/cometd');
-      this.okToPoll = false;
-
-      var msgHandshake = {
-	version: '1.0',
-	minimumVersion: '0.9',
-	channel: '/meta/handshake',
-	id: String(this.nextId())
-      };
-
-      transport.send(msgHandshake, handshook);
-    };
-
-    this.renegotiate = function(url) {
-      transport = null;
-      this.init(url);
-    };
-
-    var queueMessage = function(msg) {
-      messageQueue.push(msg);
-      if (batchNest <= 0)
-	sendMessages();
-    };
-
-    // Arrange to flush the message queue by sending all messages.
-    var sendMessages = function() {
-      if (!$.comet.okToPoll) return;	// Still in the handshake
-
-      var t = transport;
+    // Send queued messages. On completion, check and send newly-queued complete message batches
+    var send = function() {
       var sendAfterPause =
 	function() {
-	  if (batchNest > 0 ||	        // oops, another batch was started
-	     messageQueue.length === 0)	// Or someone else sent out messages
+	  // Do nothing if another batch was started or someone else sent our messages:
+	  var msgcount = messagesQueued.length;
+	  if (batchNesting > 0 || msgcount === 0)
 	    return;
 
-	  // Assign our clientId and a new sequence number to each message in the batch:
-	  $(messageQueue).each(function() {
-	    this.clientId = String($.comet.clientId);
-	    this.id = String($.comet.nextId());
-	  });
-	  t.send(messageQueue);
-          messageQueue = [];
+	  if (receiptSent < receivedSeq)
+	    messagesQueued[msgcount-1].confirm = receiptSent = receivedSeq;
+	  var messagesToSend = messagesQueued;
+	  messagesQueued = [];
+	  sending = ajax(
+	    messagesToSend,
+	    function(messages) {
+	      sending = null;
+	      messagesQueued = [];
+	      deliver(messages);
+	    },
+	    function() {	// Error occurred
+	      sending = null;	// Put the failed messages back in the front of the queue
+	      for (i = 0; i < messagesToSend.length; i++) {
+		if (i in messagesToSend)
+		  messagesQueued.unshift(messagesToSend[i]);
+	      }
+	      backoff(send);	// Try again later
+	    }
+	  );
 	};
 
       // Do the above after a zero timeout in case further messages get synchronously queued:
       setTimeout(sendAfterPause, 0);
     };
 
-    var deliver = function(msg) {
-      if (msg.advice)
-        transport.advise(msg.advice);
+    // Deliver the received message to any subscriber on that channel, or to the null (wildcard) channel if none.
+    var deliver = function(message) {
+      var i;
+      if (jQuery.isArray(message)) {
+	// Deliver each message in the array:
+	for (i = 0; i < message.length; i++) {
+	  if (i in message)
+	    deliver(message[i]);
+	}
+      } else {
+	var id = message['id'];
+	if (id && receivedSeq < id)
+	  receivedSeq = id;
 
-      switch (msg.channel)
-      {
-      case '/meta/connect':
-        // if (msg.successful)
-	//   console.log('fruitful poll');
-        break;
-
-      // add in subscription handling stuff
-      case '/meta/subscribe':
-        if (!msg.successful)
-          return;
-        break;
-
-      case '/meta/unsubscribe':
-        if (!msg.successful)
-          return;
-        break;
-
-      default:
-	break;
-      }
-
-      if (msg.data)
-      {
-	if (trigger)
-	  $.event.trigger(msg.channel, [msg]);
-
-	var cb = subscriptionCallbacks[msg.channel];
-
-	if (cb)
-	  cb(msg);
+	var channel = message['channel'];
+	var data = message['data'];
+	var s = subscriptions[channel] || subscriptions[null];
+	if (s && data) {
+	  for (i = 0; s && i < s.length; i++) {
+	    if (i in s)
+	      s[i].call($.comet, message, data, channel);
+	  }
+	}
       }
     };
 
-    // Hold queued messages until the end of the batch
-    this.startBatch = function() {
-      batchNest++;
-    };
-
-    this.endBatch = function() {
-      if (--batchNest <= 0)
-      {
-        batchNest = 0;
-        if (messageQueue.length > 0)
-          sendMessages();
-      }
-    };
-
-    // Only one subscription per channel is allowed.
-    this.subscribe = function(subscription, responseCB) {
-      // if this topic has not been subscribed to yet, send the message now
-      if (!subscriptions[subscription])
-      {
-        subscriptions.push(subscription);
-        if (responseCB)
-          subscriptionCallbacks[subscription] = responseCB;
-        queueMessage({ channel: '/meta/subscribe', subscription: subscription });
-      }
-      //$.event.add(window, subscription, responseCB);
-    };
-
-    this.unsubscribe = function(subscription) {
-      queueMessage({ channel: '/meta/unsubscribe', subscription: subscription });
-    };
-
-    this.publish = function(channel, msg) {
-      queueMessage({channel: channel, data: msg});
-    };
-
-    this.deliver = function(response) {
-      $(response).each(function() { deliver(this); });
-    };
-
-    this.disconnect = function() {
-      $(subscriptions).each(function(i) { $.comet.unsubscribe(subscriptions[i]); });
-      queueMessage({channel:'/meta/disconnect'});
-      transport = null;
+    // Send a command to a channel:
+    var command = function(msg) {
+      $.comet.startBatch();
+      msg.id = (++sentSeq).toString();
+      msg.clientId = clientId;
+      messagesQueued.push(msg);
+      $.comet.endBatch();
     };
   };
-
 })(jQuery);

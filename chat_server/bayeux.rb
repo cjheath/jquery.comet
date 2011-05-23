@@ -17,6 +17,7 @@ class Bayeux < Sinatra::Base
     #attr_accessor :lastSeen       # Timestamp when we last had activity from this client
     attr_accessor :channel        # The EM::Channel on which this client subscribes
     attr_accessor :subscription   # The EM::Subscription if one is currently active
+    attr_accessor :satisfied
     attr_accessor :queue          # Messages queued for this client
 
     def initialize clientId
@@ -145,6 +146,7 @@ class Bayeux < Sinatra::Base
   end
 
   def connect message
+    @is_connect = true
     clientId = message['clientId']
     trace "Client #{clientId} is long-polling"
     client = clients[clientId]
@@ -156,6 +158,10 @@ class Bayeux < Sinatra::Base
 
     queued = client.queue
     if !queued.empty? || client.subscription
+      if client.subscription
+        # If the client opened a second long-poll, finish that one and this:
+        client.channel.push true    # Complete the outstanding poll
+      end
       client.queue << connect_response
       client.flush(self)
       return
@@ -164,19 +170,17 @@ class Bayeux < Sinatra::Base
     client.subscription =
       client.channel.subscribe do |msg|
         queued = client.queue
-        if !queued.empty?
-          client.queue << connect_response
-          client.flush(self)
-        else
-          trace "Client #{clientId} awoke but found an empty queue"
-          respond([connect_response])   # Don't leave a dangling request.
-        end
+        trace "Client #{clientId} awoke but found an empty queue" if queued.empty?
+        client.queue << connect_response
+        client.flush(self)
+        client.satisfied = true
       end
+    client.satisfied = false
 
     if client.subscription
       trace "Client #{clientId} is waiting on #{client.subscription}"
       on_close {
-        trace "long-poll done, removing EM subscription for #{clientId}"
+        trace "long-poll timed out, removing EM subscription for #{clientId}" unless client.satisfied
         client.channel.unsubscribe(client.subscription)
         client.subscription = nil
       }
@@ -238,7 +242,7 @@ class Bayeux < Sinatra::Base
         { :successful => true }
 
       else
-        puts "Unknown channel in request: "+message
+        puts "Unknown channel in request: "+message.inspect
         pass  # 404
       end
 
@@ -272,19 +276,16 @@ class Bayeux < Sinatra::Base
     end
   end
 
-  apost '/cometd' do
-    # This code corrects for a JSON serialisation bug in Chrome,
-    # where an array gets serialised as an object. For now, I'm
-    # continuing to use json2.js, which does it properly.
-    #
-    #message = params['message']
-    #if message.is_a?(Hash) and message["0"]
-    #  message = message.keys.sort_by{|k| k.to_i}.inject([]) { |a, k| a << message[k] }
-    #end
-
-    message_json = params['message']
+  def receive message_json
     message = JSON.parse(message_json)
+
+    # The message here should either be a connect message (long-poll) or messages being sent.
+    # For a long-poll we return a reponse immediately only if messages are queued for this client.
+    # For a send-message, we always return a response immediately, even if it's just an acknowledgement.
+    @is_connect = false
     response = deliver_all(message)
+    return if @is_connect
+
     if clientId = params['clientId'] and client = clients[clientId]
       client.queue += response
       client.channel.push true if !response.empty?  # Complete an outstanding poll
@@ -293,22 +294,19 @@ class Bayeux < Sinatra::Base
       # No client so no queue. Respond immediately if we can, else long-poll
       respond(response) unless response.empty?
     end
+  rescue => e
+    respond([])
+  end
+
+  # Normal JSON operation uses a POST
+  apost '/cometd' do
+    receive params['message']
   end
 
   # JSONP always uses a GET, since it fulfils a script tag.
-  # GETs can only send data which fit into a single URL, and this doesn't check for overflow!
+  # GETs can only send data which fit into a single URL.
   aget '/cometd' do
-    message_json = params['message']
-    message = JSON.parse(message_json)
-    response = deliver_all(message)
-
-    if clientId = params['clientId'] and client = clients[clientId]
-      client.queue += response
-      client.channel.push true if !response.empty?  # Complete an outstanding poll
-      client.flush if params['jsonp'] || client.queue.empty?
-    else
-      respond(response)   # No client so no queue to worry about, always respond immediately
-    end
+    receive params['message']
   end
 
 end

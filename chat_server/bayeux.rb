@@ -1,5 +1,6 @@
 #
-# A Bayeux (COMET) server using Async Sinatra. This requires a web server built on EventMachine, such as Thin.
+# A Bayeux (COMET) server using Async Sinatra.
+# This requires a web server built on EventMachine, such as Thin.
 #
 # Copyright: Clifford Heath http://dataconstellation.com 2011
 # License: MIT

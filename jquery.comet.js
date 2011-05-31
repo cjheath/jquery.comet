@@ -271,7 +271,6 @@
 	    messagesToSend,
 	    function(messages) {
 	      sending = null;
-	      messagesQueued = [];
 	      deliver(messages);
 	    },
 	    function() {	// Error occurred

@@ -37,7 +37,7 @@ a server crash.
 
 You need to have Ruby installed. Then:
 
-  gem install thin async_sinatra rack
+  gem install thin async_sinatra rack bayeux-rack
   cd chat_server
   rackup --server thin
 

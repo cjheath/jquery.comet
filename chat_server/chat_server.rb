@@ -1,6 +1,8 @@
 #
 # Serve the chat demo
 #
+# Install the "bayeux-rack" gem before running this with "rackup --server thin"
+#
 # Copyright: Clifford Heath, Data Constellation, http://dataconstellation.com, 2011
 # License: MIT
 
@@ -15,7 +17,7 @@ end
 
 class ChatServer < Bayeux
   configure do
-    set :public, Sinatra::Application.root+'/../chat_demo'
+    set :public, File.dirname(__FILE__)+'/../chat_demo'
     # set :tracing, true      # Enable to get Bayeux tracing
   end
 
@@ -72,6 +74,6 @@ class ChatServer < Bayeux
 
   not_found do
     puts 'Not found: ' + request.url
-    'No dice'
+    request.url+': No dice'
   end
 end

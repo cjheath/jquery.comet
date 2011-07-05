@@ -147,7 +147,7 @@
 	if (i in s)
 	  s.splice(i, 1);
       }
-      if (s.length == 0) {
+      if (s.length === 0) {
 	// No further subscriptions on this channel, tell the server
 	delete subscriptions[channel];
 	command({channel: '/meta/unsubscribe', subscription: channel});
@@ -198,7 +198,7 @@
 	errorLastDelay = 0;
 	poll();
       }
-    }
+    };
 
     // Start a long-poll request now.
     poll = function() {
@@ -233,7 +233,7 @@
 	message,
 	function(messages) {
 	  greetz = messages[0];
-	  if (clientId = greetz['clientId']) {
+	  if ((clientId = greetz['clientId'])) {
 	    connected = true;
 	    if (greetz['advice'])
 	      advice(greetz['advice']);
@@ -255,7 +255,7 @@
     };
 
     // Send queued messages. On completion, check and send newly-queued complete message batches
-    var send = function() {
+    send = function() {
       var sendAfterPause =
 	function() {
 	  // Do nothing if another batch was started or someone else sent our messages:
@@ -289,7 +289,7 @@
     };
 
     // Deliver the received message to any subscriber on that channel, or to the null (wildcard) channel if none.
-    var deliver = function(message) {
+    deliver = function(message) {
       var i;
       if (jQuery.isArray(message)) {
 	// Deliver each message in the array:
@@ -315,7 +315,7 @@
     };
 
     // Send a command to a channel:
-    var command = function(msg) {
+    command = function(msg) {
       $.comet.startBatch();
       msg.id = (++sentSeq).toString();
       msg.clientId = clientId;

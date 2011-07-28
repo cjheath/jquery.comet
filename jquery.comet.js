@@ -43,7 +43,7 @@
 	errorLastDelay = null,		// Current timeout duration
 	errorDelay = 5*1000,		// Initial timeout in milliseconds for retry on error
 	errorBackoff = 1.5,		// Multiplier to increase timeout
-	errorMaxDelay = 60*1000,	// ... up to the maximum error count
+	errorMaxDelay = 60*1000,	// ... up to the maximum error delay
 
 	// Inbound:
 	polling = null,			// The XHR object for our long poll
@@ -96,6 +96,10 @@
       // Message channel subscriptions:
       subscriptions = {};		// Keyed by channel name, each entry an array of callbacks
 
+      errorDelay = options['errorDelay'] || 5*1000;   // Initial retry after 5 seconds
+      errorBackoff = options['errorBackoff'] || 1.5;  // Delay multiplier on each error
+      errorMaxDelay = options['errorMaxDelay'] || 60*1000;  // Maximum retry delay
+
       // Kick off the party
       handshake();
     };
@@ -105,6 +109,7 @@
       for (var channel in subscriptions)
 	command({channel: '/meta/subscribe', subscription: channel});
       this.publish('/meta/disconnect', {id: (++sentSeq).toString(), clientId: clientId, channel: '/meta/disconnect'});
+      clientId = null;
       connected = false;    // Don't reconnect
     };
 
@@ -202,6 +207,8 @@
 
     // Start a long-poll request now.
     poll = function() {
+      if (polling)
+	return;	  // This can happen during reconnect
       polling = ajax(
 	{
 	  channel: '/meta/connect',
@@ -212,7 +219,7 @@
 	function(message) {	// Success, Process messages and reconnect immediately
 	  polling = null;
 	  deliver(message);
-	  reconnect(false);
+	  reconnect(message == ""); // On connect failure, message is empty
 	},
 	function() {		// Error, reconnect after timeout
 	  polling = null;
@@ -238,6 +245,12 @@
 	    if (greetz['advice'])
 	      advice(greetz['advice']);
 	    if (greetz['successful']) {
+	      // Send any subscriptions that already exist
+	      $.comet.startBatch();
+	      for (var subscription in subscriptions)
+		command({channel: '/meta/subscribe', subscription: subscription});
+	      $.comet.endBatch();
+
 	      reconnect(false);
 	      deliver(messages);
 	      for (m in messagesQueued)
@@ -267,20 +280,23 @@
 	    messagesQueued[msgcount-1].confirm = receiptSent = receivedSeq;
 	  var messagesToSend = messagesQueued;
 	  messagesQueued = [];
+	  var resend = function() {
+	    sending = null;	// Put the failed messages back in the front of the queue
+	    for (i = 0; i < messagesToSend.length; i++) {
+	      if (i in messagesToSend)
+		messagesQueued.unshift(messagesToSend[i]);
+	    }
+	    backoff(send);	// Try again later
+	  };
+
 	  sending = ajax(
 	    messagesToSend,
 	    function(messages) {
 	      sending = null;
-	      deliver(messages);
+	      if (!deliver(messages))
+		resend();
 	    },
-	    function() {	// Error occurred
-	      sending = null;	// Put the failed messages back in the front of the queue
-	      for (i = 0; i < messagesToSend.length; i++) {
-		if (i in messagesToSend)
-		  messagesQueued.unshift(messagesToSend[i]);
-	      }
-	      backoff(send);	// Try again later
-	    }
+	    resend // Error occurred
 	  );
 	};
 
@@ -298,6 +314,16 @@
 	    deliver(message[i]);
 	}
       } else {
+	var a = message['advice'];
+
+	if (a && a['reconnect'] && a['reconnect'] == 'handshake') {
+	  // Connection aborted, we're being told to reconnect. Kill any existing long-poll first.
+	  if (polling)
+	    polling.abort();
+	  handshake();
+	  return false;
+	}
+
 	var id = message['id'];
 	if (id && receivedSeq < id)
 	  receivedSeq = id;
@@ -312,6 +338,7 @@
 	  }
 	}
       }
+      return true;
     };
 
     // Send a command to a channel:
@@ -322,5 +349,8 @@
       messagesQueued.push(msg);
       $.comet.endBatch();
     };
+
+    this.clientId = function() { return clientId; };
+    this.errorCount = function() { return errorCount; };
   };
 })(jQuery);

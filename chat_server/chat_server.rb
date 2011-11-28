@@ -17,7 +17,7 @@ end
 
 class ChatServer < Bayeux
   configure do
-    set :public, File.dirname(__FILE__)+'/../chat_demo'
+    set :public_folder, File.dirname(__FILE__)+'/../chat_demo'
     # set :tracing, true      # Enable to get Bayeux tracing
   end
 
@@ -26,7 +26,7 @@ class ChatServer < Bayeux
   end
 
   get '/chat' do
-    send_file settings.public+'/index.html'
+    send_file settings.public_folder+'/index.html'
   end
 
   def send_client_list

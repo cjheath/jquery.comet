@@ -9,7 +9,7 @@ with a test server in Sinatra (uses async_sinatra under Thin).
   <script src="jquery.comet.js"> </script>
   <script>
       // Connect and start polling:
-      $.comet.init('http://my.server.com:9191')
+      $.comet.connect('http://my.server.com:9191/cometd')
 
       // Receive messages sent to this channel:
       $.comet.subscribe('/myapp/channel1', function(msg) { ... });
